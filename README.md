@@ -10,6 +10,7 @@ Framework-agnostic distributed tracing and performance monitoring for any PHP ap
 
 - **Framework Agnostic** - Works with any PHP application (vanilla PHP, Symfony, Slim, etc.)
 - **OpenTelemetry Standard** - Built on OpenTelemetry for industry-standard tracing
+- **Automatic Context Propagation** - Child spans automatically inherit from parent
 - **Manual Instrumentation** - Full control over what and how you trace
 - **HTTP Request Tracing** - Track requests, database queries, and external API calls
 - **Error Tracking** - Capture exceptions with full context
@@ -39,7 +40,7 @@ $tracekit = new TracekitClient([
     'endpoint' => 'https://app.tracekit.dev/v1/traces',
 ]);
 
-// Start a trace
+// Start a trace (returns array with span and scope)
 $span = $tracekit->startTrace('process-request', [
     'http.method' => $_SERVER['REQUEST_METHOD'],
     'http.url' => $_SERVER['REQUEST_URI'],
@@ -57,6 +58,9 @@ try {
     $tracekit->endSpan($span, [], 'ERROR');
     throw $e;
 }
+
+// Important: flush traces before exit
+$tracekit->flush();
 ```
 
 ## Configuration
@@ -146,7 +150,8 @@ $tracekit->flush();
 <?php
 
 function getUserById($tracekit, $userId) {
-    $span = $tracekit->startSpan('db.query.users', null, [
+    // Child span automatically links to active parent via context
+    $span = $tracekit->startSpan('db.query.users', [
         'db.system' => 'mysql',
         'db.operation' => 'SELECT',
         'user.id' => $userId,
@@ -177,7 +182,7 @@ function getUserById($tracekit, $userId) {
 <?php
 
 function fetchExternalData($tracekit, $url) {
-    $span = $tracekit->startSpan('http.client.get', null, [
+    $span = $tracekit->startSpan('http.client.get', [
         'http.url' => $url,
         'http.method' => 'GET',
     ]);
@@ -200,19 +205,22 @@ function fetchExternalData($tracekit, $url) {
 }
 ```
 
-### Nested Spans
+### Nested Spans (Automatic Context Propagation)
 
 ```php
 <?php
 
 function processOrder($tracekit, $orderId) {
-    $orderSpan = $tracekit->startSpan('process-order', null, [
+    // Parent span
+    $orderSpan = $tracekit->startSpan('process-order', [
         'order.id' => $orderId,
     ]);
 
     try {
+        // Child spans automatically link to orderSpan via context
+
         // Validate order
-        $validationSpan = $tracekit->startSpan('validate-order', $orderSpan, [
+        $validationSpan = $tracekit->startSpan('validate-order', [
             'order.id' => $orderId,
         ]);
         $valid = validateOrder($orderId);
@@ -223,14 +231,14 @@ function processOrder($tracekit, $orderId) {
         }
 
         // Process payment
-        $paymentSpan = $tracekit->startSpan('process-payment', $orderSpan, [
+        $paymentSpan = $tracekit->startSpan('process-payment', [
             'order.id' => $orderId,
         ]);
         $paymentResult = processPayment($orderId);
         $tracekit->endSpan($paymentSpan, ['payment.status' => $paymentResult]);
 
         // Ship order
-        $shippingSpan = $tracekit->startSpan('ship-order', $orderSpan, [
+        $shippingSpan = $tracekit->startSpan('ship-order', [
             'order.id' => $orderId,
         ]);
         $trackingId = shipOrder($orderId);
@@ -390,6 +398,35 @@ $app->get('/hello/{name}', function (Request $request, Response $response, $args
 $app->run();
 ```
 
+## How Context Propagation Works
+
+TraceKit uses OpenTelemetry's Context API to automatically manage span relationships:
+
+1. **Root Span**: `startTrace()` creates a root span and activates it in the context
+2. **Child Spans**: `startSpan()` automatically inherits from the currently active span
+3. **Scope Management**: Each span has a scope that's detached when `endSpan()` is called
+4. **Automatic Hierarchy**: All spans within the same request share the same trace ID
+
+```php
+// Root span (activated in context)
+$rootSpan = $tracekit->startTrace('http-request');
+
+    // Child 1 (inherits from root automatically)
+    $child1 = $tracekit->startSpan('database-query');
+    $tracekit->endSpan($child1);  // Detaches child1, root becomes active again
+
+    // Child 2 (also inherits from root)
+    $child2 = $tracekit->startSpan('api-call');
+
+        // Grandchild (inherits from child2)
+        $grandchild = $tracekit->startSpan('process-data');
+        $tracekit->endSpan($grandchild);  // Detaches grandchild, child2 active
+
+    $tracekit->endSpan($child2);  // Detaches child2, root active
+
+$tracekit->endSpan($rootSpan);  // Detaches root
+```
+
 ## API Reference
 
 ### TracekitClient
@@ -405,31 +442,38 @@ Initialize the TraceKit client.
 - `enabled` (bool, optional) - Enable/disable tracing (default: true)
 - `sample_rate` (float, optional) - Sample rate 0.0-1.0 (default: 1.0)
 
-#### `startTrace(string $operationName, array $attributes = []): SpanInterface`
+#### `startTrace(string $operationName, array $attributes = []): array`
 
-Start a new root trace span (server request).
+Start a new root trace span (server request). Returns an array with the span and scope.
 
-#### `startSpan(string $operationName, ?SpanInterface $parentSpan = null, array $attributes = []): SpanInterface`
+**Returns:** `['span' => SpanInterface, 'scope' => ScopeInterface]`
 
-Start a new child span.
+#### `startSpan(string $operationName, array $attributes = []): array`
 
-#### `endSpan(SpanInterface $span, array $finalAttributes = [], ?string $status = 'OK'): void`
+Start a new child span. Automatically inherits from the currently active span via context.
 
-End a span with optional final attributes and status.
+**Returns:** `['span' => SpanInterface, 'scope' => ScopeInterface]`
 
-**Status values:** `'OK'`, `'ERROR'`
+#### `endSpan(array $spanData, array $finalAttributes = [], ?string $status = 'OK'): void`
 
-#### `recordException(SpanInterface $span, \Throwable $exception): void`
+End a span and detach its scope from the context.
+
+**Parameters:**
+- `$spanData` - Array returned from `startTrace()` or `startSpan()`
+- `$finalAttributes` - Optional attributes to add before ending
+- `$status` - Span status: `'OK'` or `'ERROR'`
+
+#### `recordException(array $spanData, \Throwable $exception): void`
 
 Record an exception on a span.
 
-#### `addEvent(SpanInterface $span, string $name, array $attributes = []): void`
+#### `addEvent(array $spanData, string $name, array $attributes = []): void`
 
 Add an event to a span.
 
 #### `flush(): void`
 
-Force flush all pending spans.
+Force flush all pending spans to the backend.
 
 #### `shutdown(): void`
 
@@ -442,11 +486,13 @@ TraceKit APM is designed to have minimal performance impact:
 - **< 5% overhead** on average request time
 - Asynchronous trace sending
 - Configurable sampling for high-traffic applications
+- Efficient context propagation
 
 ## Requirements
 
 - PHP 8.1 or higher
 - Composer
+- PSR-18 HTTP Client (e.g., Guzzle)
 
 ## Support
 

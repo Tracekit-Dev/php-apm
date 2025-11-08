@@ -7,6 +7,7 @@ use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\API\Trace\TracerInterface;
 use OpenTelemetry\API\Trace\TracerProviderInterface;
+use OpenTelemetry\Context\Context;
 use OpenTelemetry\SDK\Common\Attribute\Attributes;
 use OpenTelemetry\SDK\Resource\ResourceInfo;
 use OpenTelemetry\SDK\Resource\ResourceInfoFactory;
@@ -76,30 +77,63 @@ class TracekitClient
         );
     }
 
-    public function startTrace(string $operationName, array $attributes = []): SpanInterface
+    /**
+     * Start a new trace (root span) for a server request
+     * This automatically activates the span in the context
+     *
+     * @return array ['span' => SpanInterface, 'scope' => int] Scope token for cleanup
+     */
+    public function startTrace(string $operationName, array $attributes = []): array
     {
-        return $this->tracer
+        $span = $this->tracer
             ->spanBuilder($operationName)
             ->setSpanKind(SpanKind::KIND_SERVER)
             ->setAttributes($this->normalizeAttributes($attributes))
             ->startSpan();
+
+        // Activate this span in the context so child spans can inherit it
+        $scope = $span->activate();
+
+        return [
+            'span' => $span,
+            'scope' => $scope,
+        ];
     }
 
+    /**
+     * Start a child span
+     * Automatically inherits from the currently active span in context
+     *
+     * @return array ['span' => SpanInterface, 'scope' => int] Scope token for cleanup
+     */
     public function startSpan(
         string $operationName,
-        ?SpanInterface $parentSpan = null,
         array $attributes = []
-    ): SpanInterface {
-        $builder = $this->tracer
+    ): array {
+        // The span builder automatically uses the active span from context as parent
+        $span = $this->tracer
             ->spanBuilder($operationName)
             ->setSpanKind(SpanKind::KIND_INTERNAL)
-            ->setAttributes($this->normalizeAttributes($attributes));
+            ->setAttributes($this->normalizeAttributes($attributes))
+            ->startSpan();
 
-        return $builder->startSpan();
+        // Activate this span so its children can inherit it
+        $scope = $span->activate();
+
+        return [
+            'span' => $span,
+            'scope' => $scope,
+        ];
     }
 
-    public function endSpan(SpanInterface $span, array $finalAttributes = [], ?string $status = 'OK'): void
+    /**
+     * End a span and detach its scope from the context
+     */
+    public function endSpan(array $spanData, array $finalAttributes = [], ?string $status = 'OK'): void
     {
+        $span = $spanData['span'];
+        $scope = $spanData['scope'];
+
         // Add final attributes
         if (!empty($finalAttributes)) {
             $span->setAttributes($this->normalizeAttributes($finalAttributes));
@@ -113,15 +147,19 @@ class TracekitClient
         }
 
         $span->end();
+
+        // Detach the scope to restore the previous context
+        $scope->detach();
     }
 
-    public function addEvent(SpanInterface $span, string $name, array $attributes = []): void
+    public function addEvent(array $spanData, string $name, array $attributes = []): void
     {
-        $span->addEvent($name, $this->normalizeAttributes($attributes));
+        $spanData['span']->addEvent($name, $this->normalizeAttributes($attributes));
     }
 
-    public function recordException(SpanInterface $span, \Throwable $exception): void
+    public function recordException(array $spanData, \Throwable $exception): void
     {
+        $span = $spanData['span'];
         $span->recordException($exception);
         $span->setStatus(StatusCode::STATUS_ERROR, $exception->getMessage());
     }
