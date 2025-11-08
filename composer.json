@@ -1,0 +1,34 @@
+{
+    "name": "tracekit/php-apm",
+    "description": "TraceKit APM for PHP - Framework-agnostic distributed tracing and performance monitoring",
+    "keywords": ["php", "apm", "tracing", "monitoring", "opentelemetry", "performance", "distributed-tracing"],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "TraceKit",
+            "email": "hello@tracekit.dev"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "open-telemetry/sdk": "^1.0",
+        "open-telemetry/exporter-otlp": "^1.0",
+        "open-telemetry/api": "^1.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "TraceKit\\PHP\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "TraceKit\\PHP\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
