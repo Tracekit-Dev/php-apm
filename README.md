@@ -14,6 +14,7 @@ Framework-agnostic distributed tracing and performance monitoring for any PHP ap
 - **Manual Instrumentation** - Full control over what and how you trace
 - **HTTP Request Tracing** - Track requests, database queries, and external API calls
 - **Error Tracking** - Capture exceptions with full context
+- **Code Monitoring** - Live debugging with breakpoints and variable inspection
 - **Low Overhead** - Minimal performance impact
 
 ## Installation
@@ -63,6 +64,235 @@ try {
 $tracekit->flush();
 ```
 
+## Code Monitoring (Live Debugging)
+
+TraceKit includes production-safe code monitoring for live debugging without redeployment.
+
+### Enable Code Monitoring
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use TraceKit\PHP\TracekitClient;
+
+// Enable code monitoring
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-php-app',
+    'endpoint' => 'https://app.tracekit.dev/v1/traces',
+    'code_monitoring_enabled' => true,
+    'code_monitoring_max_depth' => 3,      // Nested array/object depth
+    'code_monitoring_max_string' => 1000,  // Truncate long strings
+]);
+```
+
+### Add Debug Points
+
+Add checkpoints anywhere in your code to capture variable state and stack traces:
+
+```php
+<?php
+
+class CheckoutService
+{
+    private $tracekit;
+
+    public function __construct($tracekit)
+    {
+        $this->tracekit = $tracekit;
+    }
+
+    public function processPayment($userId, $cart)
+    {
+        // Automatic snapshot capture with label
+        $this->tracekit->captureSnapshot('checkout-validation', [
+            'user_id' => $userId,
+            'cart_items' => count($cart['items'] ?? []),
+            'total_amount' => $cart['total'] ?? 0,
+        ]);
+
+        try {
+            $result = $this->chargeCard($cart['total'], $userId);
+
+            // Another checkpoint
+            $this->tracekit->captureSnapshot('payment-success', [
+                'user_id' => $userId,
+                'payment_id' => $result['payment_id'],
+                'amount' => $result['amount'],
+            ]);
+
+            return $result;
+
+        } catch (Exception $e) {
+            // Automatic error capture
+            $this->tracekit->captureSnapshot('payment-error', [
+                'user_id' => $userId,
+                'amount' => $cart['total'],
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
+        }
+    }
+
+    private function chargeCard($amount, $userId)
+    {
+        // Simulate payment processing
+        if ($amount > 1000) {
+            throw new Exception('Amount exceeds limit');
+        }
+
+        return [
+            'payment_id' => 'pay_' . uniqid(),
+            'amount' => $amount,
+            'status' => 'succeeded',
+        ];
+    }
+}
+
+// Usage
+$checkout = new CheckoutService($tracekit);
+$result = $checkout->processPayment(123, ['total' => 99.99, 'items' => ['item1']]);
+```
+
+### Manual Breakpoint Polling
+
+Since PHP doesn't have built-in background task scheduling, you need to poll for breakpoints manually:
+
+```php
+// Option 1: Poll on every Nth request
+if (rand(1, 100) <= 5) { // 5% of requests
+    $tracekit->pollBreakpoints();
+}
+
+// Option 2: Use a cron job
+// */1 * * * * php /path/to/poll-breakpoints.php
+
+// poll-breakpoints.php
+require 'vendor/autoload.php';
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-php-app',
+    'code_monitoring_enabled' => true,
+]);
+$tracekit->pollBreakpoints();
+```
+
+### Automatic Breakpoint Management
+
+- **Auto-Registration**: First call to `captureSnapshot()` automatically creates breakpoints in TraceKit
+- **Smart Matching**: Breakpoints match by function name + label (stable across code changes)
+- **Manual Polling**: You must call `pollBreakpoints()` periodically to fetch active breakpoints
+- **Production Safe**: No performance impact when breakpoints are inactive
+
+### What Gets Captured
+
+Snapshots include:
+- **Variables**: Local variables at capture point
+- **Stack Trace**: Full call stack with file/line numbers
+- **Request Context**: HTTP method, URL, headers, query params (when available)
+- **Execution Time**: When the snapshot was captured
+
+### Framework Integration Examples
+
+#### Slim Framework
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use TraceKit\PHP\TracekitClient;
+use Slim\Factory\AppFactory;
+
+$app = AppFactory::create();
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'slim-app',
+    'code_monitoring_enabled' => true,
+]);
+
+$app->post('/checkout', function ($request, $response) use ($tracekit) {
+    $data = $request->getParsedBody();
+
+    // Poll breakpoints occasionally
+    if (rand(1, 20) === 1) { // 5% chance
+        $tracekit->pollBreakpoints();
+    }
+
+    // Capture snapshot
+    $tracekit->captureSnapshot('checkout-start', [
+        'user_id' => $data['user_id'],
+        'amount' => $data['amount'],
+    ]);
+
+    // Process payment...
+    $result = ['payment_id' => 'pay_' . uniqid()];
+
+    return $response->withJson($result);
+});
+
+$app->run();
+```
+
+#### Symfony Controller
+```php
+<?php
+
+namespace App\Controller;
+
+use TraceKit\PHP\TracekitClient;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\JsonResponse;
+
+class PaymentController
+{
+    private $tracekit;
+
+    public function __construct()
+    {
+        $this->tracekit = new TracekitClient([
+            'api_key' => getenv('TRACEKIT_API_KEY'),
+            'service_name' => 'symfony-app',
+            'code_monitoring_enabled' => true,
+        ]);
+    }
+
+    public function checkout(Request $request): JsonResponse
+    {
+        // Poll occasionally (you could also use a cron job)
+        if (rand(1, 20) === 1) {
+            $this->tracekit->pollBreakpoints();
+        }
+
+        $data = json_decode($request->getContent(), true);
+
+        $this->tracekit->captureSnapshot('checkout-validation', [
+            'user_id' => $data['user_id'],
+            'cart_total' => $data['cart']['total'],
+        ]);
+
+        // Process payment...
+        $result = $this->processPayment($data);
+
+        $this->tracekit->captureSnapshot('checkout-complete', [
+            'user_id' => $data['user_id'],
+            'payment_id' => $result['payment_id'],
+        ]);
+
+        return new JsonResponse($result);
+    }
+
+    private function processPayment(array $data): array
+    {
+        // Payment logic here...
+        return ['payment_id' => 'pay_' . uniqid()];
+    }
+}
+```
+
 ## Configuration
 
 ### Basic Configuration
@@ -83,6 +313,11 @@ $tracekit = new TracekitClient([
 
     // Optional: Sample rate 0.0-1.0 (default: 1.0 = 100%)
     'sample_rate' => 0.5, // Trace 50% of requests
+
+    // Optional: Enable live code debugging (default: false)
+    'code_monitoring_enabled' => true,
+    'code_monitoring_max_depth' => 3,      // Nested array/object depth
+    'code_monitoring_max_string' => 1000,  // Truncate long strings
 ]);
 ```
 

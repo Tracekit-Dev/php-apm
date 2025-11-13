@@ -1,6 +1,6 @@
 {
     "name": "tracekit/php-apm",
-    "description": "TraceKit APM for PHP - Framework-agnostic distributed tracing and performance monitoring",
+    "description": "TraceKit APM for PHP - Framework-agnostic distributed tracing and code monitoring",
     "keywords": ["php", "apm", "tracing", "monitoring", "opentelemetry", "performance", "distributed-tracing"],
     "type": "library",
     "license": "MIT",

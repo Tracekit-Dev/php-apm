@@ -17,6 +17,8 @@ use OpenTelemetry\Contrib\Otlp\SpanExporter;
 use OpenTelemetry\Contrib\Otlp\OtlpHttpTransportFactory;
 use OpenTelemetry\SemConv\ResourceAttributes;
 
+use TraceKit\PHP\SnapshotClient;
+
 class TracekitClient
 {
     private TracerProviderInterface $tracerProvider;
@@ -26,6 +28,7 @@ class TracekitClient
     private string $serviceName;
     private bool $enabled;
     private float $sampleRate;
+    private ?SnapshotClient $snapshotClient = null;
 
     public function __construct(array $config = [])
     {
@@ -34,6 +37,24 @@ class TracekitClient
         $this->serviceName = $config['service_name'] ?? 'php-app';
         $this->enabled = $config['enabled'] ?? true;
         $this->sampleRate = $config['sample_rate'] ?? 1.0;
+
+        // Initialize code monitoring if enabled
+        if (($config['code_monitoring_enabled'] ?? false) && $this->apiKey) {
+            // Extract base URL from endpoint (remove /v1/traces path for SDK endpoints)
+            $parsedUrl = parse_url($this->endpoint);
+            $baseUrl = $parsedUrl['scheme'] . '://' . $parsedUrl['host'];
+            if (isset($parsedUrl['port'])) {
+                $baseUrl .= ':' . $parsedUrl['port'];
+            }
+
+            $this->snapshotClient = new SnapshotClient(
+                $this->apiKey,
+                $baseUrl,
+                $this->serviceName,
+                $config['code_monitoring_max_depth'] ?? 3,
+                $config['code_monitoring_max_string'] ?? 1000
+            );
+        }
 
         // Create resource with service name
         $resource = ResourceInfoFactory::defaultResource()->merge(
@@ -160,8 +181,52 @@ class TracekitClient
     public function recordException(array $spanData, \Throwable $exception): void
     {
         $span = $spanData['span'];
+        
+        // Format stack trace for code discovery
+        $stacktrace = $this->formatStackTrace($exception);
+        
+        // Add exception event with formatted stack trace
+        $span->addEvent('exception', [
+            'exception.type' => get_class($exception),
+            'exception.message' => $exception->getMessage(),
+            'exception.stacktrace' => $stacktrace,
+        ]);
+        
+        // Also use OpenTelemetry's built-in exception recording
         $span->recordException($exception);
         $span->setStatus(StatusCode::STATUS_ERROR, $exception->getMessage());
+    }
+    
+    /**
+     * Format exception stack trace for code discovery
+     */
+    private function formatStackTrace(\Throwable $exception): string
+    {
+        $frames = [];
+        // First line: where the exception was thrown
+        $frames[] = $exception->getFile() . ':' . $exception->getLine();
+        
+        foreach ($exception->getTrace() as $frame) {
+            $file = $frame['file'] ?? '';
+            $line = $frame['line'] ?? 0;
+            $function = $frame['function'] ?? '';
+            $class = $frame['class'] ?? '';
+            
+            if ($class && $function) {
+                $function = $class . '::' . $function;
+            }
+            
+            // Only include frames that have file information
+            if ($file && $function) {
+                // Format: "FunctionName at /path/file.php:42"
+                $frames[] = sprintf('%s at %s:%d', $function, $file, $line);
+            } elseif ($file) {
+                // Format: "/path/file.php:42"
+                $frames[] = sprintf('%s:%d', $file, $line);
+            }
+        }
+        
+        return implode("\n", $frames);
     }
 
     public function flush(): void
@@ -191,6 +256,44 @@ class TracekitClient
     public function isEnabled(): bool
     {
         return $this->enabled && !empty($this->apiKey);
+    }
+
+    // Code monitoring methods
+
+    /**
+     * Get the snapshot client instance
+     */
+    public function getSnapshotClient(): ?SnapshotClient
+    {
+        return $this->snapshotClient;
+    }
+
+    /**
+     * Check if code monitoring is enabled
+     */
+    public function isCodeMonitoringEnabled(): bool
+    {
+        return $this->snapshotClient !== null;
+    }
+
+    /**
+     * Capture a snapshot with automatic breakpoint detection
+     */
+    public function captureSnapshot(string $label, array $variables = [], ?array $requestContext = null): void
+    {
+        if ($this->snapshotClient) {
+            $this->snapshotClient->checkAndCaptureWithContext($requestContext, $label, $variables);
+        }
+    }
+
+    /**
+     * Poll for active breakpoints (call this periodically)
+     */
+    public function pollBreakpoints(): void
+    {
+        if ($this->snapshotClient) {
+            $this->snapshotClient->pollOnce();
+        }
     }
 
     private function normalizeAttributes(array $attributes): array
