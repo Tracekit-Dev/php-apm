@@ -318,6 +318,12 @@ $tracekit = new TracekitClient([
     'code_monitoring_enabled' => true,
     'code_monitoring_max_depth' => 3,      // Nested array/object depth
     'code_monitoring_max_string' => 1000,  // Truncate long strings
+
+    // Optional: Map hostnames to service names for service graph
+    'service_name_mappings' => [
+        'localhost:8082' => 'payment-service',
+        'localhost:8083' => 'user-service',
+    ],
 ]);
 ```
 
@@ -330,6 +336,178 @@ TRACEKIT_API_KEY=ctxio_your_generated_api_key_here
 TRACEKIT_ENDPOINT=https://app.tracekit.dev/v1/traces
 TRACEKIT_SERVICE_NAME=my-php-app
 ```
+
+## Automatic HTTP Client Instrumentation
+
+TraceKit provides instrumentation for outgoing HTTP calls to create service dependency graphs.
+
+### How It Works
+
+When your service makes an HTTP request:
+
+1. ✅ TraceKit creates a **CLIENT span** for the outgoing request
+2. ✅ Trace context is injected into request headers (`traceparent`)
+3. ✅ `peer.service` attribute is set based on the target hostname
+4. ✅ The receiving service creates a **SERVER span** linked to your CLIENT span
+5. ✅ TraceKit maps the dependency: **YourService → TargetService**
+
+### Supported HTTP Clients
+
+#### cURL (with wrapper)
+
+```php
+$ch = curl_init("http://payment-service/charge");
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['amount' => 99.99]));
+
+// Wrap curl_exec with TraceKit instrumentation
+$instrumentation = $tracekit->getHttpClientInstrumentation();
+$result = $instrumentation->wrapCurlExec($ch);
+
+curl_close($ch);
+```
+
+**What This Does:**
+- Creates a CLIENT span for the cURL request
+- Sets `peer.service = "payment-service"`
+- Injects `traceparent` header for distributed tracing
+- Records HTTP status code and errors
+
+#### Guzzle (with middleware)
+
+```php
+use GuzzleHttp\Client;
+use GuzzleHttp\HandlerStack;
+
+// Create Guzzle client with TraceKit middleware
+$stack = HandlerStack::create();
+$stack->push($tracekit->getHttpClientInstrumentation()->getGuzzleMiddleware());
+
+$client = new Client(['handler' => $stack]);
+
+// All Guzzle requests now automatically create CLIENT spans!
+$response = $client->post('http://payment-service/charge', [
+    'json' => ['amount' => 99.99],
+]);
+
+$response = $client->get('http://inventory-service/check');
+```
+
+### Service Name Detection
+
+TraceKit intelligently extracts service names from URLs:
+
+| URL | Extracted Service Name |
+|-----|------------------------|
+| `http://payment-service:3000` | `payment-service` |
+| `http://payment.internal` | `payment` |
+| `http://payment.svc.cluster.local` | `payment` |
+| `https://api.example.com` | `api.example.com` |
+
+This works seamlessly with:
+- Kubernetes service names
+- Internal DNS names
+- Docker Compose service names
+- External APIs
+
+### Custom Service Name Mappings
+
+For local development or when service names can't be inferred from hostnames, use `service_name_mappings`:
+
+```php
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-service',
+    // Map localhost URLs to actual service names
+    'service_name_mappings' => [
+        'localhost:8082' => 'payment-service',
+        'localhost:8083' => 'user-service',
+        'localhost:8084' => 'inventory-service',
+        'localhost:5001' => 'analytics-service',
+    ],
+]);
+
+// Now requests to localhost:8082 will show as "payment-service" in the service graph
+$response = $httpClient->get('http://localhost:8082/charge');
+// -> Creates CLIENT span with peer.service = "payment-service"
+```
+
+This is especially useful when:
+- Running microservices locally on different ports
+- Using Docker Compose with localhost networking
+- Testing distributed tracing in development
+
+### Complete Example: Multi-Service Application
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use TraceKit\PHP\TracekitClient;
+use GuzzleHttp\Client;
+use GuzzleHttp\HandlerStack;
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'checkout-service',
+]);
+
+// Setup Guzzle with TraceKit instrumentation
+$stack = HandlerStack::create();
+$stack->push($tracekit->getHttpClientInstrumentation()->getGuzzleMiddleware());
+$httpClient = new Client(['handler' => $stack]);
+
+// Start request trace
+$requestSpan = $tracekit->startTrace('http-request', [
+    'http.method' => 'POST',
+    'http.url' => '/checkout',
+]);
+
+try {
+    // These HTTP calls automatically create CLIENT spans
+    $paymentResponse = $httpClient->post('http://payment-service/charge', [
+        'json' => [
+            'amount' => 99.99,
+            'user_id' => 123,
+        ],
+    ]);
+
+    $inventoryResponse = $httpClient->post('http://inventory-service/reserve', [
+        'json' => ['item_id' => 456],
+    ]);
+
+    $tracekit->endSpan($requestSpan, ['http.status_code' => 200]);
+
+    echo json_encode(['success' => true]);
+
+} catch (\Exception $e) {
+    $tracekit->recordException($requestSpan, $e);
+    $tracekit->endSpan($requestSpan, [], 'ERROR');
+    echo json_encode(['error' => $e->getMessage()]);
+}
+
+$tracekit->flush();
+```
+
+### Viewing Service Dependencies
+
+Visit your TraceKit dashboard to see:
+
+- **Service Map**: Visual graph showing which services call which
+- **Service List**: Table of all services with health metrics
+- **Service Detail**: Upstream/downstream dependencies with latency and error info
+
+### Why Manual Wrapping?
+
+Unlike Node.js or Python, PHP doesn't support automatic function interception. Therefore:
+
+- **cURL**: Use the wrapper function `wrapCurlExec()`
+- **Guzzle**: Add the middleware once when creating the client
+- **Other clients**: Create middleware/wrappers as needed
+
+This gives you full control while maintaining zero-overhead when not used.
 
 ## Usage Examples
 
