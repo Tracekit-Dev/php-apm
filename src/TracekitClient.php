@@ -14,6 +14,10 @@ use OpenTelemetry\SDK\Common\Attribute\Attributes;
 use OpenTelemetry\SDK\Resource\ResourceInfo;
 use OpenTelemetry\SDK\Resource\ResourceInfoFactory;
 use OpenTelemetry\SDK\Trace\SpanProcessor\SimpleSpanProcessor;
+use OpenTelemetry\SDK\Trace\SpanProcessorInterface;
+use OpenTelemetry\SDK\Trace\ReadableSpanInterface;
+use OpenTelemetry\SDK\Trace\ReadWriteSpanInterface;
+use OpenTelemetry\SDK\Common\Future\CancellationInterface;
 use OpenTelemetry\SDK\Trace\TracerProvider;
 use OpenTelemetry\Contrib\Otlp\SpanExporter;
 use OpenTelemetry\Contrib\Otlp\OtlpHttpTransportFactory;
@@ -21,6 +25,70 @@ use OpenTelemetry\SemConv\ResourceAttributes;
 
 use TraceKit\PHP\SnapshotClient;
 use TraceKit\PHP\Instrumentation\HttpClientInstrumentation;
+
+/**
+ * Custom span processor that sends traces to Local UI
+ */
+class LocalUISpanProcessor implements SpanProcessorInterface
+{
+    private array $spans = [];
+    private const LOCAL_UI_TRACES_URL = 'http://localhost:9999/v1/traces';
+    private bool $hasLogged = false;
+
+    public function onStart(ReadWriteSpanInterface $span, ContextInterface $parentContext): void
+    {
+        // No action needed on start
+    }
+
+    public function onEnd(ReadableSpanInterface $span): void
+    {
+        // Collect span data
+        $this->spans[] = $span;
+    }
+
+    public function forceFlush(?CancellationInterface $cancellation = null): bool
+    {
+        if (empty($this->spans)) {
+            return true;
+        }
+
+        try {
+            // Convert spans to OTLP format
+            $exporter = new SpanExporter(
+                (new OtlpHttpTransportFactory())->create(
+                    self::LOCAL_UI_TRACES_URL,
+                    'application/json'
+                )
+            );
+
+            // Convert ReadableSpanInterface to SpanDataInterface
+            $spanData = array_map(function($span) {
+                return $span->toSpanData();
+            }, $this->spans);
+
+            // Export the span data
+            $exporter->export($spanData);
+
+            if (!$this->hasLogged) {
+                error_log('🔍 Sent traces to Local UI');
+                $this->hasLogged = true;
+            }
+
+            $this->spans = [];
+            return true;
+        } catch (\Exception $e) {
+            // Silently fail - don't block trace sending
+            error_log('Failed to send traces to Local UI: ' . $e->getMessage());
+            $this->spans = [];
+            return false;
+        }
+    }
+
+    public function shutdown(?CancellationInterface $cancellation = null): bool
+    {
+        return $this->forceFlush($cancellation);
+    }
+}
 
 class TracekitClient
 {
@@ -80,6 +148,13 @@ class TracekitClient
         // Create span processors
         $spanProcessors = [];
 
+        // Add Local UI processor in development environments
+        $env = getenv('ENV') ?: getenv('ENVIRONMENT');
+        if ($env === 'development' && $this->detectLocalUI()) {
+            $spanProcessors[] = new LocalUISpanProcessor();
+        }
+
+        // Add cloud API processor if enabled and API key exists
         if ($this->enabled && $this->apiKey) {
             // Configure OTLP HTTP transport
             $transportFactory = new OtlpHttpTransportFactory();
@@ -380,6 +455,32 @@ class TracekitClient
     public function getHttpClientInstrumentation(): ?HttpClientInstrumentation
     {
         return $this->httpClientInstrumentation;
+    }
+
+    /**
+     * Detect if TraceKit Local UI is running at localhost:9999
+     */
+    private function detectLocalUI(): bool
+    {
+        try {
+            $context = stream_context_create([
+                'http' => [
+                    'timeout' => 1,
+                    'ignore_errors' => true,
+                ]
+            ]);
+
+            $response = @file_get_contents('http://localhost:9999/api/health', false, $context);
+
+            if ($response !== false) {
+                error_log('🔍 Local UI detected at http://localhost:9999');
+                return true;
+            }
+
+            return false;
+        } catch (\Exception $e) {
+            return false;
+        }
     }
 
     /**
