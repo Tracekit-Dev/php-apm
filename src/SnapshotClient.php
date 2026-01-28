@@ -85,6 +85,9 @@ class SnapshotClient
             $requestContext = $this->extractRequestContext();
         }
 
+        // Scan variables for security issues
+        $securityScan = $this->scanForSecurityIssues($variables);
+
         // Create snapshot
         $snapshot = [
             'breakpoint_id' => $breakpoint['id'] ?? null,
@@ -93,7 +96,8 @@ class SnapshotClient
             'function_name' => $location['function'],
             'label' => $label,
             'line_number' => $location['line'],
-            'variables' => $this->sanitizeVariables($variables),
+            'variables' => $securityScan['variables'],
+            'security_flags' => $securityScan['flags'],
             'stack_trace' => $this->getStackTrace(),
             'request_context' => $requestContext,
             'captured_at' => date('c'),
@@ -120,6 +124,9 @@ class SnapshotClient
 
         $requestContext = $this->extractRequestContext();
 
+        // Scan variables for security issues
+        $securityScan = $this->scanForSecurityIssues($variables);
+
         $snapshot = [
             'breakpoint_id' => $breakpoint['id'] ?? null,
             'service_name' => $this->serviceName,
@@ -127,7 +134,8 @@ class SnapshotClient
             'function_name' => $breakpoint['function_name'] ?? 'unknown',
             'label' => $breakpoint['label'] ?? null,
             'line_number' => $lineNumber,
-            'variables' => $this->sanitizeVariables($variables),
+            'variables' => $securityScan['variables'],
+            'security_flags' => $securityScan['flags'],
             'stack_trace' => $this->getStackTrace(),
             'request_context' => $requestContext,
             'captured_at' => date('c'),
@@ -479,6 +487,54 @@ class SnapshotClient
         }
 
         return $filtered;
+    }
+
+    /**
+     * Scan variables for security issues (passwords, API keys, etc.)
+     */
+    private function scanForSecurityIssues(array $variables): array
+    {
+        $sensitivePatterns = [
+            'password' => '/(?i)(password|passwd|pwd)\s*[=:]\s*["\']?[^\s"\']{6,}/',
+            'api_key'  => '/(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?[A-Za-z0-9_-]{20,}/',
+            'jwt'      => '/eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/',
+            'credit_card' => '/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b/',
+        ];
+
+        $securityFlags = [];
+        $sanitized = $this->sanitizeVariables($variables);
+
+        // Scan variable names
+        foreach ($variables as $name => $value) {
+            if (preg_match('/password|secret|token|key|credential/i', $name)) {
+                $securityFlags[] = [
+                    'type' => 'sensitive_variable_name',
+                    'severity' => 'medium',
+                    'variable' => $name,
+                ];
+                $sanitized[$name] = '[REDACTED]';
+                continue;
+            }
+
+            // Scan variable values
+            $serialized = json_encode($value);
+            foreach ($sensitivePatterns as $type => $pattern) {
+                if (preg_match($pattern, $serialized)) {
+                    $securityFlags[] = [
+                        'type' => "sensitive_data_{$type}",
+                        'severity' => 'high',
+                        'variable' => $name,
+                    ];
+                    $sanitized[$name] = '[REDACTED]';
+                    break;
+                }
+            }
+        }
+
+        return [
+            'variables' => $sanitized,
+            'flags' => $securityFlags,
+        ];
     }
 
     /**
