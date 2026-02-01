@@ -13,6 +13,7 @@ Framework-agnostic distributed tracing and performance monitoring for any PHP ap
 - **Automatic Context Propagation** - Child spans automatically inherit from parent
 - **Manual Instrumentation** - Full control over what and how you trace
 - **HTTP Request Tracing** - Track requests, database queries, and external API calls
+- **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - **Error Tracking** - Capture exceptions with full context
 - **Code Monitoring** - Live debugging with breakpoints and variable inspection
 - **Low Overhead** - Minimal performance impact
@@ -45,6 +46,7 @@ $tracekit = new TracekitClient([
 $span = $tracekit->startTrace('process-request', [
     'http.method' => $_SERVER['REQUEST_METHOD'],
     'http.url' => $_SERVER['REQUEST_URI'],
+    'http.client_ip' => TracekitClient::extractClientIp(),  // Automatic IP detection
 ]);
 
 try {

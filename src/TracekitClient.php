@@ -196,11 +196,20 @@ class TracekitClient
     /**
      * Start a new trace (root span) for a server request
      * This automatically activates the span in the context
+     * Automatically captures client IP if not provided in attributes
      *
      * @return array ['span' => SpanInterface, 'scope' => int] Scope token for cleanup
      */
     public function startTrace(string $operationName, array $attributes = []): array
     {
+        // Automatically add client IP if not already present
+        if (!isset($attributes['http.client_ip'])) {
+            $clientIp = self::extractClientIp();
+            if ($clientIp !== null) {
+                $attributes['http.client_ip'] = $clientIp;
+            }
+        }
+
         $span = $this->tracer
             ->spanBuilder($operationName)
             ->setSpanKind(SpanKind::KIND_SERVER)
@@ -235,6 +244,7 @@ class TracekitClient
     /**
      * Start a SERVER span with optional parent context from traceparent header
      * This is used by middleware to create spans that are children of incoming trace context
+     * Automatically captures client IP if not provided in attributes
      *
      * @return array ['span' => SpanInterface, 'scope' => int] Scope token for cleanup
      */
@@ -243,6 +253,14 @@ class TracekitClient
         array $attributes = [],
         ?ContextInterface $parentContext = null
     ): array {
+        // Automatically add client IP if not already present
+        if (!isset($attributes['http.client_ip'])) {
+            $clientIp = self::extractClientIp();
+            if ($clientIp !== null) {
+                $attributes['http.client_ip'] = $clientIp;
+            }
+        }
+
         $builder = $this->tracer
             ->spanBuilder($operationName)
             ->setSpanKind(SpanKind::KIND_SERVER)
@@ -455,6 +473,100 @@ class TracekitClient
     public function getHttpClientInstrumentation(): ?HttpClientInstrumentation
     {
         return $this->httpClientInstrumentation;
+    }
+
+    /**
+     * Extract client IP address from HTTP request.
+     *
+     * Checks X-Forwarded-For, X-Real-IP headers (for proxied requests)
+     * and falls back to REMOTE_ADDR.
+     *
+     * This function is automatically used by TraceKit middleware/integrations
+     * to add client IP to all traces for DDoS detection and traffic analysis.
+     *
+     * @return string|null Client IP address or null if not found
+     *
+     * @example
+     * // Basic usage in vanilla PHP
+     * $clientIp = TracekitClient::extractClientIp();
+     * $span = $tracekit->startTrace('process-request', [
+     *     'http.method' => $_SERVER['REQUEST_METHOD'],
+     *     'http.url' => $_SERVER['REQUEST_URI'],
+     *     'http.client_ip' => $clientIp,
+     * ]);
+     *
+     * @example
+     * // Usage with custom headers (Laravel, Symfony, etc.)
+     * $clientIp = TracekitClient::extractClientIp($request->headers->all());
+     */
+    public static function extractClientIp(?array $headers = null): ?string
+    {
+        // If no headers provided, use $_SERVER
+        if ($headers === null) {
+            // Check X-Forwarded-For header (for requests behind proxy/load balancer)
+            // Format: "client, proxy1, proxy2"
+            if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+                // Take the first IP (the client)
+                $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+                $clientIp = trim($ips[0]);
+
+                // Validate it's a valid IP
+                if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                    return $clientIp;
+                }
+            }
+
+            // Check X-Real-IP header (alternative proxy header)
+            if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+                $clientIp = trim($_SERVER['HTTP_X_REAL_IP']);
+                if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                    return $clientIp;
+                }
+            }
+
+            // Fallback to REMOTE_ADDR (direct connection)
+            if (!empty($_SERVER['REMOTE_ADDR'])) {
+                $clientIp = $_SERVER['REMOTE_ADDR'];
+                if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                    return $clientIp;
+                }
+            }
+
+            return null;
+        }
+
+        // Use provided headers array (normalize keys to lowercase)
+        $normalizedHeaders = [];
+        foreach ($headers as $key => $value) {
+            $normalizedHeaders[strtolower($key)] = is_array($value) ? $value[0] : $value;
+        }
+
+        // Check X-Forwarded-For
+        if (!empty($normalizedHeaders['x-forwarded-for'])) {
+            $ips = explode(',', $normalizedHeaders['x-forwarded-for']);
+            $clientIp = trim($ips[0]);
+            if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                return $clientIp;
+            }
+        }
+
+        // Check X-Real-IP
+        if (!empty($normalizedHeaders['x-real-ip'])) {
+            $clientIp = trim($normalizedHeaders['x-real-ip']);
+            if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                return $clientIp;
+            }
+        }
+
+        // Fall back to REMOTE_ADDR from $_SERVER if still available
+        if (!empty($_SERVER['REMOTE_ADDR'])) {
+            $clientIp = $_SERVER['REMOTE_ADDR'];
+            if (filter_var($clientIp, FILTER_VALIDATE_IP)) {
+                return $clientIp;
+            }
+        }
+
+        return null;
     }
 
     /**
