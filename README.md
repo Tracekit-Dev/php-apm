@@ -16,6 +16,7 @@ Framework-agnostic distributed tracing and performance monitoring for any PHP ap
 - **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - **Error Tracking** - Capture exceptions with full context
 - **Code Monitoring** - Live debugging with breakpoints and variable inspection
+- **Metrics API** - Counter, Gauge, and Histogram metrics with automatic OTLP export
 - **Low Overhead** - Minimal performance impact
 
 ## Installation
@@ -361,6 +362,431 @@ class PaymentController
         return ['payment_id' => 'pay_' . uniqid()];
     }
 }
+```
+
+## Metrics
+
+TraceKit APM includes a powerful metrics API for tracking application performance and business metrics with automatic OTLP export.
+
+### Metric Types
+
+- **Counter**: Monotonically increasing values (requests, errors, events)
+- **Gauge**: Point-in-time values that can go up or down (active connections, queue size, memory usage)
+- **Histogram**: Value distributions (request duration, payload sizes)
+
+### Basic Usage
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use TraceKit\PHP\TracekitClient;
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-app',
+]);
+
+// Create metrics
+$requestCounter = $tracekit->counter('http.requests.total', [
+    'service' => 'my-app'
+]);
+
+$activeRequestsGauge = $tracekit->gauge('http.requests.active', [
+    'service' => 'my-app'
+]);
+
+$requestDurationHistogram = $tracekit->histogram('http.request.duration', [
+    'unit' => 'ms'
+]);
+```
+
+### Counter
+
+Counters track values that only increase (never decrease).
+
+```php
+<?php
+
+// Create a counter
+$requestCounter = $tracekit->counter('http.requests.total', [
+    'service' => 'my-app',
+    'environment' => 'production'
+]);
+
+// Increment by 1
+$requestCounter->inc();
+
+// Add a specific value
+$requestCounter->add(5.0);
+```
+
+**Common Use Cases:**
+- Request count
+- Error count
+- Cache hits/misses
+- Items processed
+
+### Gauge
+
+Gauges track values that can go up or down.
+
+```php
+<?php
+
+// Create a gauge
+$activeRequestsGauge = $tracekit->gauge('http.requests.active', [
+    'service' => 'my-app'
+]);
+
+// Set to specific value
+$activeRequestsGauge->set(42.0);
+
+// Increment by 1
+$activeRequestsGauge->inc();
+
+// Decrement by 1
+$activeRequestsGauge->dec();
+```
+
+**Common Use Cases:**
+- Active requests
+- Queue size
+- Memory usage
+- Active connections
+
+### Histogram
+
+Histograms track the distribution of values.
+
+```php
+<?php
+
+// Create a histogram
+$requestDurationHistogram = $tracekit->histogram('http.request.duration', [
+    'service' => 'my-app',
+    'unit' => 'ms'
+]);
+
+// Record values
+$requestDurationHistogram->record(45.2);  // 45.2ms
+$requestDurationHistogram->record(123.8); // 123.8ms
+```
+
+**Common Use Cases:**
+- Request duration
+- Response size
+- Query execution time
+- Processing time
+
+### Complete Example: HTTP Request Metrics
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use TraceKit\PHP\TracekitClient;
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'php-api',
+]);
+
+// Initialize metrics
+$requestCounter = $tracekit->counter('http.requests.total', [
+    'service' => 'php-api'
+]);
+$activeRequestsGauge = $tracekit->gauge('http.requests.active', [
+    'service' => 'php-api'
+]);
+$requestDurationHistogram = $tracekit->histogram('http.request.duration', [
+    'unit' => 'ms'
+]);
+$errorCounter = $tracekit->counter('http.errors.total', [
+    'service' => 'php-api'
+]);
+
+// Track request start
+$startTime = microtime(true);
+$activeRequestsGauge->inc();
+
+try {
+    // Your application logic
+    $result = processRequest();
+
+    http_response_code(200);
+    echo json_encode($result);
+
+} catch (\Exception $e) {
+    http_response_code(500);
+    echo json_encode(['error' => $e->getMessage()]);
+
+    // Track errors
+    $errorCounter->inc();
+}
+
+// Track metrics at request end
+$requestCounter->inc();
+$activeRequestsGauge->dec();
+$duration = (microtime(true) - $startTime) * 1000; // Convert to ms
+$requestDurationHistogram->record($duration);
+
+// Track error status codes
+$statusCode = http_response_code();
+if ($statusCode >= 400) {
+    $errorCounter->inc();
+}
+
+// Flush all data
+$tracekit->shutdown();
+```
+
+### Framework Examples
+
+#### Vanilla PHP Middleware
+
+```php
+<?php
+
+class MetricsMiddleware
+{
+    private $tracekit;
+    private $requestCounter;
+    private $activeRequestsGauge;
+    private $requestDurationHistogram;
+    private $errorCounter;
+
+    public function __construct($tracekit)
+    {
+        $this->tracekit = $tracekit;
+
+        // Initialize metrics once
+        $this->requestCounter = $tracekit->counter('http.requests.total', [
+            'service' => 'my-app'
+        ]);
+        $this->activeRequestsGauge = $tracekit->gauge('http.requests.active', [
+            'service' => 'my-app'
+        ]);
+        $this->requestDurationHistogram = $tracekit->histogram('http.request.duration', [
+            'unit' => 'ms'
+        ]);
+        $this->errorCounter = $tracekit->counter('http.errors.total', [
+            'service' => 'my-app'
+        ]);
+    }
+
+    public function handle(callable $next)
+    {
+        $startTime = microtime(true);
+        $this->activeRequestsGauge->inc();
+
+        try {
+            $response = $next();
+            return $response;
+        } finally {
+            // Track metrics
+            $this->requestCounter->inc();
+            $this->activeRequestsGauge->dec();
+
+            $duration = (microtime(true) - $startTime) * 1000;
+            $this->requestDurationHistogram->record($duration);
+
+            if (http_response_code() >= 400) {
+                $this->errorCounter->inc();
+            }
+        }
+    }
+}
+
+// Usage
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-app',
+]);
+
+$metrics = new MetricsMiddleware($tracekit);
+$metrics->handle(function() {
+    // Your application logic
+    echo "Hello World!";
+});
+
+$tracekit->shutdown();
+```
+
+#### Slim Framework
+
+```php
+<?php
+
+use Slim\Factory\AppFactory;
+use TraceKit\PHP\TracekitClient;
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'slim-app',
+]);
+
+// Initialize metrics
+$requestCounter = $tracekit->counter('http.requests.total', ['service' => 'slim-app']);
+$activeRequestsGauge = $tracekit->gauge('http.requests.active', ['service' => 'slim-app']);
+$requestDurationHistogram = $tracekit->histogram('http.request.duration', ['unit' => 'ms']);
+$errorCounter = $tracekit->counter('http.errors.total', ['service' => 'slim-app']);
+
+$app = AppFactory::create();
+
+// Metrics middleware
+$app->add(function ($request, $handler) use (
+    $tracekit,
+    $requestCounter,
+    $activeRequestsGauge,
+    $requestDurationHistogram,
+    $errorCounter
+) {
+    $startTime = microtime(true);
+    $activeRequestsGauge->inc();
+
+    try {
+        $response = $handler->handle($request);
+
+        // Track metrics
+        $requestCounter->inc();
+        $activeRequestsGauge->dec();
+
+        $duration = (microtime(true) - $startTime) * 1000;
+        $requestDurationHistogram->record($duration);
+
+        if ($response->getStatusCode() >= 400) {
+            $errorCounter->inc();
+        }
+
+        return $response;
+    } catch (\Exception $e) {
+        $errorCounter->inc();
+        throw $e;
+    }
+});
+
+$app->get('/hello', function ($request, $response) {
+    $response->getBody()->write("Hello World!");
+    return $response;
+});
+
+$app->run();
+
+// Shutdown to flush metrics
+$tracekit->shutdown();
+```
+
+### Tags for Dimensional Analysis
+
+Add tags to metrics for filtering and grouping:
+
+```php
+<?php
+
+// Metrics with tags
+$requestCounter = $tracekit->counter('http.requests.total', [
+    'service' => 'my-app',
+    'environment' => 'production',
+    'region' => 'us-east-1'
+]);
+
+$errorCounter = $tracekit->counter('http.errors.total', [
+    'service' => 'my-app',
+    'error_type' => '4xx'
+]);
+
+$cacheCounter = $tracekit->counter('cache.hits', [
+    'service' => 'my-app',
+    'cache_type' => 'redis'
+]);
+```
+
+### Common Use Cases
+
+#### Database Metrics
+
+```php
+<?php
+
+$dbQueryCounter = $tracekit->counter('db.queries.total', [
+    'service' => 'my-app',
+    'db' => 'mysql'
+]);
+
+$dbConnectionsGauge = $tracekit->gauge('db.connections.active', [
+    'service' => 'my-app',
+    'db' => 'mysql'
+]);
+
+$dbQueryDuration = $tracekit->histogram('db.query.duration', [
+    'service' => 'my-app',
+    'unit' => 'ms'
+]);
+
+// Track a query
+$dbQueryCounter->inc();
+$dbConnectionsGauge->inc();
+
+$startTime = microtime(true);
+$result = $pdo->query("SELECT * FROM users");
+$duration = (microtime(true) - $startTime) * 1000;
+
+$dbQueryDuration->record($duration);
+$dbConnectionsGauge->dec();
+```
+
+#### Business Metrics
+
+```php
+<?php
+
+$checkoutCounter = $tracekit->counter('business.checkouts.total', [
+    'service' => 'checkout-service'
+]);
+
+$revenueGauge = $tracekit->gauge('business.revenue.total', [
+    'service' => 'checkout-service',
+    'currency' => 'USD'
+]);
+
+$orderValueHistogram = $tracekit->histogram('business.order.value', [
+    'service' => 'checkout-service',
+    'currency' => 'USD'
+]);
+
+// Track a successful checkout
+$checkoutCounter->inc();
+$revenueGauge->set($totalRevenue);
+$orderValueHistogram->record($orderAmount);
+```
+
+### Metric Export
+
+Metrics are automatically buffered and exported to TraceKit:
+
+- **Buffer size**: 100 metrics
+- **Flush interval**: 10 seconds
+- **Endpoint**: Automatically resolved to `/v1/metrics`
+- **Format**: OpenTelemetry Protocol (OTLP)
+
+Metrics are automatically sent when:
+1. Buffer reaches 100 metrics
+2. 10 seconds have elapsed since last export
+3. `shutdown()` is called
+
+```php
+<?php
+
+// Explicit flush of all pending data (traces + metrics)
+$tracekit->shutdown();
+
+// At the end of your script
+register_shutdown_function(function() use ($tracekit) {
+    $tracekit->shutdown();
+});
 ```
 
 ## Configuration

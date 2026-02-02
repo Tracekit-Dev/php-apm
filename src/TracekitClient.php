@@ -102,11 +102,16 @@ class TracekitClient
     private array $serviceNameMappings;
     private ?SnapshotClient $snapshotClient = null;
     private ?HttpClientInstrumentation $httpClientInstrumentation = null;
+    private ?MetricsRegistry $metricsRegistry = null;
     private TraceContextPropagator $propagator;
 
     public function __construct(array $config = [])
     {
-        $this->endpoint = $config['endpoint'] ?? 'https://app.tracekit.dev/v1/traces';
+        // Set defaults
+        $baseEndpoint = $config['endpoint'] ?? 'app.tracekit.dev';
+        $tracesPath = $config['traces_path'] ?? '/v1/traces';
+        $metricsPath = $config['metrics_path'] ?? '/v1/metrics';
+
         $this->apiKey = $config['api_key'] ?? '';
         $this->serviceName = $config['service_name'] ?? 'php-app';
         $this->enabled = $config['enabled'] ?? true;
@@ -114,21 +119,23 @@ class TracekitClient
         $this->serviceNameMappings = $config['service_name_mappings'] ?? [];
         $this->propagator = TraceContextPropagator::getInstance();
 
+        // Resolve endpoints
+        $useSSL = !str_starts_with($baseEndpoint, 'http://');
+        $this->endpoint = $this->resolveEndpoint($baseEndpoint, $tracesPath, $useSSL);
+        $metricsEndpoint = $this->resolveEndpoint($baseEndpoint, $metricsPath, $useSSL);
+        $baseUrl = $this->resolveEndpoint($baseEndpoint, '', $useSSL);
+
         // Suppress OpenTelemetry error output (export failures, etc.) in development
         // Set 'suppress_errors' => false in production to see export errors
         if ($config['suppress_errors'] ?? true) {
             $this->suppressOpenTelemetryErrors();
         }
 
+        // Initialize metrics registry
+        $this->metricsRegistry = new MetricsRegistry($metricsEndpoint, $this->apiKey, $this->serviceName);
+
         // Initialize code monitoring if enabled
         if (($config['code_monitoring_enabled'] ?? false) && $this->apiKey) {
-            // Extract base URL from endpoint (remove /v1/traces path for SDK endpoints)
-            $parsedUrl = parse_url($this->endpoint);
-            $baseUrl = $parsedUrl['scheme'] . '://' . $parsedUrl['host'];
-            if (isset($parsedUrl['port'])) {
-                $baseUrl .= ':' . $parsedUrl['port'];
-            }
-
             $this->snapshotClient = new SnapshotClient(
                 $this->apiKey,
                 $baseUrl,
@@ -397,13 +404,6 @@ class TracekitClient
         }
     }
 
-    public function shutdown(): void
-    {
-        if ($this->tracerProvider instanceof TracerProvider) {
-            $this->tracerProvider->shutdown();
-        }
-    }
-
     public function getTracer(): TracerInterface
     {
         return $this->tracer;
@@ -635,5 +635,99 @@ class TracekitClient
         }
 
         return $normalized;
+    }
+
+    /**
+     * Resolve endpoint URL from base endpoint and path
+     */
+    private function resolveEndpoint(string $endpoint, string $path, bool $useSSL = true): string
+    {
+        // If endpoint has a scheme
+        if (str_starts_with($endpoint, 'http://') || str_starts_with($endpoint, 'https://')) {
+            $endpoint = rtrim($endpoint, '/');
+            $trimmed = preg_replace('#^https?://#', '', $endpoint);
+
+            // If endpoint has a path component
+            if (str_contains($trimmed, '/')) {
+                // Always extract base URL and append correct path
+                $base = $this->extractBaseURL($endpoint);
+                if ($path === '') {
+                    return $base;
+                }
+                return $base . $path;
+            }
+
+            // Just host with scheme, add the path
+            return $endpoint . $path;
+        }
+
+        // No scheme - build URL with scheme
+        $scheme = $useSSL ? 'https://' : 'http://';
+        $endpoint = rtrim($endpoint, '/');
+        return $scheme . $endpoint . $path;
+    }
+
+    /**
+     * Extract base URL (scheme + host) from full URL
+     */
+    private function extractBaseURL(string $fullURL): string
+    {
+        // Check if URL contains known service-specific paths
+        $hasServicePath = str_contains($fullURL, '/v1/traces') ||
+                          str_contains($fullURL, '/v1/metrics') ||
+                          str_contains($fullURL, '/api/v1/traces') ||
+                          str_contains($fullURL, '/api/v1/metrics');
+
+        // If it doesn't have a service-specific path, keep the URL as-is
+        if (!$hasServicePath) {
+            return $fullURL;
+        }
+
+        $parsed = parse_url($fullURL);
+        $base = $parsed['scheme'] . '://' . $parsed['host'];
+        if (isset($parsed['port'])) {
+            $base .= ':' . $parsed['port'];
+        }
+        return $base;
+    }
+
+    /**
+     * Get or create a counter metric
+     */
+    public function counter(string $name, array $tags = []): Counter
+    {
+        return $this->metricsRegistry->counter($name, $tags);
+    }
+
+    /**
+     * Get or create a gauge metric
+     */
+    public function gauge(string $name, array $tags = []): Gauge
+    {
+        return $this->metricsRegistry->gauge($name, $tags);
+    }
+
+    /**
+     * Get or create a histogram metric
+     */
+    public function histogram(string $name, array $tags = []): Histogram
+    {
+        return $this->metricsRegistry->histogram($name, $tags);
+    }
+
+    /**
+     * Shutdown the client and flush all pending data
+     */
+    public function shutdown(): void
+    {
+        if ($this->snapshotClient) {
+            $this->snapshotClient->stop();
+        }
+
+        if ($this->metricsRegistry) {
+            $this->metricsRegistry->shutdown();
+        }
+
+        $this->tracerProvider->shutdown();
     }
 }
