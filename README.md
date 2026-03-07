@@ -364,6 +364,151 @@ class PaymentController
 }
 ```
 
+## PII Scrubbing
+
+TraceKit automatically scans snapshot variables for sensitive data before sending them to the server. This ensures that passwords, API keys, tokens, and other sensitive information never leave your application.
+
+### Auto-Detected Patterns
+
+The SDK automatically detects and redacts the following sensitive data types:
+
+- **Passwords** - Common password field values
+- **API Keys** - API key strings and prefixes
+- **Tokens** - Authentication and session tokens
+- **Credit Cards** - Card numbers (Visa, Mastercard, Amex, etc.)
+- **Email Addresses** - RFC-compliant email patterns
+- **SSNs** - US Social Security Numbers
+- **JWTs** - JSON Web Tokens (`eyJ...`)
+- **AWS Keys** - AWS access key IDs (`AKIA...`)
+- **Stripe Keys** - Stripe API keys (`sk_live_...`, `pk_live_...`)
+- **Private Keys** - PEM-encoded private key blocks
+
+### Sensitive Variable Name Detection
+
+Variables with sensitive names are automatically redacted as `[REDACTED:sensitive_name]`. The SDK matches the following names: `password`, `passwd`, `pwd`, `secret`, `token`, `key`, `credential`, `api_key`, `apikey`.
+
+The SDK uses letter-based boundaries (not `\b`) to correctly match names like `api_key` and `user_token`, where the underscore would otherwise prevent a word boundary match.
+
+### Value Pattern Redaction
+
+When a value matches a known sensitive pattern (e.g., a credit card number or JWT), it is redacted as `[REDACTED:type]` regardless of the variable name.
+
+### Example
+
+```php
+<?php
+
+// These variables are automatically redacted before sending:
+$tracekit->captureSnapshot('checkout', [
+    'user_id' => 123,                          // Sent as-is
+    'password' => 'hunter2',                   // -> [REDACTED:sensitive_name]
+    'api_key' => 'sk_live_abc123',             // -> [REDACTED:sensitive_name]
+    'user_token' => 'eyJhbGci...',             // -> [REDACTED:sensitive_name]
+    'card_number' => '4111111111111111',        // -> [REDACTED:credit_card]
+    'email' => 'user@example.com',             // -> [REDACTED:email]
+    'note' => 'contains eyJhbGci... in text',  // -> [REDACTED:jwt]
+]);
+```
+
+PII scrubbing is enabled by default when code monitoring is active. No additional configuration is needed.
+
+## Kill Switch
+
+TraceKit provides a server-side kill switch to disable code monitoring per service without any code changes.
+
+### How It Works
+
+- **Enable**: Toggle the kill switch from the TraceKit dashboard or API
+- **Immediate Effect**: The SDK stops capturing snapshots as soon as the kill switch is detected
+- **Auto-Resume**: When the kill switch is disabled, snapshot captures resume automatically on the next poll cycle
+
+### PHP Process-per-Request Consideration
+
+Unlike long-running SDKs (Node.js, Python, Go), PHP uses a process-per-request model. This means there is no persistent in-memory state between requests. The kill switch status must be fetched on every request (or on a percentage of requests) via `pollBreakpoints()`:
+
+```php
+<?php
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-php-app',
+    'code_monitoring_enabled' => true,
+]);
+
+// Poll on every request to get current kill switch state
+$tracekit->pollBreakpoints();
+
+// This call is a no-op when kill switch is active
+$tracekit->captureSnapshot('checkout-validation', [
+    'user_id' => $userId,
+    'cart_total' => $cartTotal,
+]);
+```
+
+To reduce overhead, you can poll on a percentage of requests and cache the result:
+
+```php
+<?php
+
+// Option 1: Poll on every request (most responsive to kill switch changes)
+$tracekit->pollBreakpoints();
+
+// Option 2: Poll on ~5% of requests (lower overhead, slower kill switch response)
+if (rand(1, 20) === 1) {
+    $tracekit->pollBreakpoints();
+}
+
+// Option 3: Use a cron job to update a shared cache (e.g., Redis, APCu)
+// */1 * * * * php /path/to/poll-breakpoints.php
+```
+
+You can toggle the kill switch from the TraceKit dashboard under **Services > [Your Service] > Code Monitoring** or via the API.
+
+## SSE Real-time Updates
+
+**Note:** SSE (Server-Sent Events) is **not applicable** to the PHP SDK. PHP's process-per-request model means there is no long-running process to maintain an SSE connection. The PHP SDK relies on polling via `pollBreakpoints()` to receive breakpoint changes and kill switch updates.
+
+For real-time updates in PHP applications, consider:
+
+- Polling `pollBreakpoints()` on every request for the most responsive experience
+- Using a cron job to poll and cache the result in a shared store (Redis, APCu, or file-based cache)
+- Using the [Laravel APM](https://github.com/Tracekit-Dev/laravel-apm) package, which integrates with Laravel's scheduler for automatic polling
+
+## Circuit Breaker
+
+The SDK includes a built-in circuit breaker to protect your application if the TraceKit backend becomes unreachable.
+
+### How It Works
+
+- **Failure Threshold**: After **3 consecutive capture failures** within a **60-second window**, the circuit breaker trips
+- **Pause**: Code monitoring is automatically paused, stopping all snapshot capture attempts
+- **Cooldown**: After a **5-minute cooldown period**, the circuit breaker resets and captures resume
+- **Transparent**: No exceptions are raised in your application code; snapshots are silently skipped while the circuit is open
+
+### PHP Behavior
+
+Since PHP is process-per-request, the circuit breaker state is tracked per-request. If the backend is unreachable, the SDK will fail fast after the first failed HTTP call within a single request, avoiding repeated timeouts:
+
+```php
+<?php
+
+$tracekit = new TracekitClient([
+    'api_key' => getenv('TRACEKIT_API_KEY'),
+    'service_name' => 'my-php-app',
+    'code_monitoring_enabled' => true,
+]);
+
+// Normal operation: snapshots are captured and sent
+$tracekit->captureSnapshot('label', ['key' => 'value']);
+
+// If backend is unreachable:
+// - Capture attempt fails silently (no exception thrown)
+// - Subsequent captures in the same request are skipped
+// - Next request starts fresh
+```
+
+No configuration is required. The circuit breaker is always active when code monitoring is enabled.
+
 ## Metrics
 
 TraceKit APM includes a powerful metrics API for tracking application performance and business metrics with automatic OTLP export.
