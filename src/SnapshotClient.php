@@ -221,6 +221,20 @@ class SnapshotClient
             // Scan variables for security issues
             $securityScan = $this->scanForSecurityIssues($variables);
 
+            // Extract trace context from OpenTelemetry
+            $traceId = null;
+            $spanId = null;
+            try {
+                $currentSpan = \OpenTelemetry\API\Trace\Span::getCurrent();
+                $spanContext = $currentSpan->getContext();
+                if ($spanContext->isValid() && ($spanContext->getTraceFlags() & \OpenTelemetry\API\Trace\TraceFlags::SAMPLED)) {
+                    $traceId = $spanContext->getTraceId();
+                    $spanId = $spanContext->getSpanId();
+                }
+            } catch (\Throwable $e) {
+                // OpenTelemetry not available or not configured
+            }
+
             // Create snapshot
             $snapshot = [
                 'breakpoint_id' => $breakpoint['id'] ?? null,
@@ -233,6 +247,8 @@ class SnapshotClient
                 'security_flags' => $securityScan['flags'],
                 'stack_trace' => $this->getStackTrace(),
                 'request_context' => $requestContext,
+                'trace_id' => $traceId,
+                'span_id' => $spanId,
                 'captured_at' => date('c'),
             ];
 
