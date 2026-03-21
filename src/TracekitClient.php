@@ -25,6 +25,7 @@ use OpenTelemetry\SemConv\ResourceAttributes;
 
 use TraceKit\PHP\SnapshotClient;
 use TraceKit\PHP\Instrumentation\HttpClientInstrumentation;
+use TraceKit\PHP\Integrations\LlmInstrumentation;
 
 /**
  * Custom span processor that sends traces to Local UI
@@ -102,6 +103,7 @@ class TracekitClient
     private array $serviceNameMappings;
     private ?SnapshotClient $snapshotClient = null;
     private ?HttpClientInstrumentation $httpClientInstrumentation = null;
+    private ?LlmInstrumentation $llmInstrumentation = null;
     private ?MetricsRegistry $metricsRegistry = null;
     private TraceContextPropagator $propagator;
 
@@ -198,6 +200,12 @@ class TracekitClient
             $this->tracer,
             $this->serviceNameMappings
         );
+
+        // Initialize LLM instrumentation if config provided
+        $llmConfig = $config['llm'] ?? [];
+        if (!empty($llmConfig) || getenv('TRACEKIT_LLM_CAPTURE_CONTENT')) {
+            $this->llmInstrumentation = new LlmInstrumentation($this->tracer, $llmConfig);
+        }
     }
 
     /**
@@ -473,6 +481,27 @@ class TracekitClient
     public function getHttpClientInstrumentation(): ?HttpClientInstrumentation
     {
         return $this->httpClientInstrumentation;
+    }
+
+    /**
+     * Get LLM instrumentation middleware for Guzzle
+     *
+     * Returns a Guzzle middleware that auto-instruments OpenAI and Anthropic API calls.
+     * Add to your Guzzle HandlerStack:
+     *
+     *   $stack = HandlerStack::create();
+     *   $stack->push($tracekitClient->getLlmMiddleware());
+     *   $client = new Client(['handler' => $stack]);
+     *
+     * Or for automatic instrumentation, pass 'llm' config:
+     *   $tracekit = new TracekitClient([
+     *       'api_key' => '...',
+     *       'llm' => ['capture_content' => true],
+     *   ]);
+     */
+    public function getLlmMiddleware(): ?callable
+    {
+        return $this->llmInstrumentation?->getGuzzleMiddleware();
     }
 
     /**
