@@ -9,6 +9,13 @@ use GuzzleHttp\HandlerStack;
 // Read API keys from environment
 $openaiKey = getenv('OPENAI_API_KEY');
 $anthropicKey = getenv('ANTHROPIC_API_KEY');
+$tracekitKey = getenv('TRACEKIT_API_KEY');
+
+if (!$tracekitKey) {
+    echo "[ERROR] TRACEKIT_API_KEY is not set.\n";
+    echo "Set your TraceKit API key (ctxio_...) to authenticate trace exports.\n";
+    exit(1);
+}
 
 if (!$openaiKey && !$anthropicKey) {
     echo "[ERROR] Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set.\n";
@@ -18,9 +25,10 @@ if (!$openaiKey && !$anthropicKey) {
 
 // Initialize TracekitClient with LLM instrumentation enabled
 $tracekit = new TracekitClient([
-    'api_key' => 'test-php-llm',
+    'api_key' => $tracekitKey,
     'service_name' => 'php-llm-test',
     'endpoint' => 'http://localhost:8081/v1/traces',
+    'suppress_errors' => false,
     'llm' => [
         'capture_content' => true,
         'openai' => true,
