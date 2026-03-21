@@ -2,7 +2,7 @@
 
 All notable changes to the TraceKit PHP SDK will be documented in this file.
 
-## 1.3.0 - 2026-03-21
+## 1.2.2 - 2026-03-21
 
 ### Added
 - LLM auto-instrumentation for OpenAI and Anthropic APIs via Guzzle middleware
