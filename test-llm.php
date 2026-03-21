@@ -149,7 +149,7 @@ function testAnthropicNonStreaming(Client $httpClient, string $apiKey): bool
                 'Content-Type' => 'application/json',
             ],
             'json' => [
-                'model' => 'claude-3-5-haiku-20241022',
+                'model' => 'claude-haiku-4-5-20251001',
                 'max_tokens' => 50,
                 'messages' => [
                     ['role' => 'user', 'content' => 'Say hello in exactly 3 words.'],
@@ -185,7 +185,7 @@ function testAnthropicStreaming(Client $httpClient, string $apiKey): bool
                 'Content-Type' => 'application/json',
             ],
             'json' => [
-                'model' => 'claude-3-5-haiku-20241022',
+                'model' => 'claude-haiku-4-5-20251001',
                 'max_tokens' => 100,
                 'messages' => [
                     ['role' => 'user', 'content' => 'Count from 1 to 5.'],
