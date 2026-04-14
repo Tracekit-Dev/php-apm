@@ -78,6 +78,26 @@ class SnapshotClient
         $this->piiPatterns = array_merge(self::defaultPiiPatterns(), $customPiiPatterns);
     }
 
+    // ---- v25 Breakpoint Config Helpers ----
+
+    /**
+     * Extract v25 config fields from a breakpoint payload.
+     * Returns defaults for any missing field.
+     */
+    private function extractV25Config(array $bp): array
+    {
+        return [
+            'mode'                => $bp['mode'] ?? 'capture',
+            'stack_depth'         => $bp['stack_depth'] ?? null,
+            'max_depth'           => $bp['max_depth'] ?? null,
+            'max_payload_bytes'   => $bp['max_payload_bytes'] ?? null,
+            'condition'           => $bp['condition'] ?? '',
+            'condition_eval'      => $bp['condition_eval'] ?? '',
+            'capture_expressions' => $bp['capture_expressions'] ?? [],
+            'idle_timeout_hours'  => $bp['idle_timeout_hours'] ?? null,
+        ];
+    }
+
     /** Set opt-in capture depth limit. null = unlimited (default uses maxVariableDepth for sanitization). */
     public function setCaptureDepth(?int $depth): void { $this->captureDepth = $depth; }
 
@@ -213,6 +233,51 @@ class SnapshotClient
                 return;
             }
 
+            // v25: Extract breakpoint config
+            $v25 = $this->extractV25Config($breakpoint);
+
+            // v25: Evaluate condition locally for sdk-evaluable expressions
+            if ($v25['condition'] !== '' && $v25['condition_eval'] === 'sdk-evaluable') {
+                try {
+                    $condResult = Evaluator::evaluateCondition($v25['condition'], $variables);
+                    if (!$condResult) {
+                        return; // Condition false, skip capture
+                    }
+                } catch (UnsupportedExpressionException $e) {
+                    // Classified as sdk-evaluable but failed locally, fall through to server
+                    error_log('TraceKit: expression classified as sdk-evaluable but failed locally, falling back to server: ' . $e->getMessage());
+                } catch (\Throwable $e) {
+                    // Other evaluation error, log and fall through
+                    error_log('TraceKit: condition evaluation error, falling back to server: ' . $e->getMessage());
+                }
+            }
+
+            // v25: Logpoint mode - capture only expression results, skip locals/stack/request
+            if ($v25['mode'] === 'logpoint') {
+                $exprResults = Evaluator::evaluateExpressions($v25['capture_expressions'], $variables);
+                $logSnapshot = [
+                    'breakpoint_id' => $breakpoint['id'] ?? null,
+                    'service_name' => $this->serviceName,
+                    'file_path' => $location['file'],
+                    'function_name' => $location['function'],
+                    'label' => $label,
+                    'line_number' => $location['line'],
+                    'variables' => [],
+                    'expression_results' => $exprResults,
+                    'stack_trace' => '',
+                    'request_context' => null,
+                    'captured_at' => date('c'),
+                ];
+                $this->captureSnapshotWithPayloadLimit($logSnapshot, $v25['max_payload_bytes']);
+                return;
+            }
+
+            // v25: Apply per-breakpoint depth limit (overrides SDK-level)
+            $depthLimit = $v25['max_depth'] ?? $this->captureDepth;
+            if ($depthLimit !== null && $depthLimit > 0) {
+                $variables = $this->limitVariableDepth($variables, 0, $depthLimit);
+            }
+
             // Extract request context if not provided
             if ($requestContext === null) {
                 $requestContext = $this->extractRequestContext();
@@ -235,6 +300,15 @@ class SnapshotClient
                 // OpenTelemetry not available or not configured
             }
 
+            // v25: Evaluate capture expressions
+            $exprResults = [];
+            if (!empty($v25['capture_expressions'])) {
+                $exprResults = Evaluator::evaluateExpressions($v25['capture_expressions'], $variables);
+            }
+
+            // v25: Capture stack trace with configurable depth
+            $stackTrace = $this->getStackTraceWithDepth($v25['stack_depth']);
+
             // Create snapshot
             $snapshot = [
                 'breakpoint_id' => $breakpoint['id'] ?? null,
@@ -245,26 +319,16 @@ class SnapshotClient
                 'line_number' => $location['line'],
                 'variables' => $securityScan['variables'],
                 'security_flags' => $securityScan['flags'],
-                'stack_trace' => $this->getStackTrace(),
+                'expression_results' => $exprResults,
+                'stack_trace' => $stackTrace,
                 'request_context' => $requestContext,
                 'trace_id' => $traceId,
                 'span_id' => $spanId,
                 'captured_at' => date('c'),
             ];
 
-            // Apply opt-in max payload limit
-            $payload = json_encode($snapshot);
-            if ($this->maxPayload !== null && strlen($payload) > $this->maxPayload) {
-                $snapshot['variables'] = [
-                    '_truncated' => true,
-                    '_payload_size' => strlen($payload),
-                    '_max_payload' => $this->maxPayload,
-                ];
-                $snapshot['security_flags'] = [];
-            }
-
-            // Send snapshot
-            $this->captureSnapshot($snapshot);
+            // v25: Apply per-breakpoint payload limit (overrides SDK-level)
+            $this->captureSnapshotWithPayloadLimit($snapshot, $v25['max_payload_bytes']);
         } catch (\Throwable $t) {
             // Crash isolation: never let TraceKit errors propagate to host application
             error_log('TraceKit: error in capture: ' . $t->getMessage());
@@ -361,6 +425,97 @@ class SnapshotClient
         }
 
         return implode("\n", $formatted);
+    }
+
+    /**
+     * Get formatted stack trace with configurable depth limit.
+     * v25: stack_depth from breakpoint config limits frame count.
+     * Default: full trace up to 32KB.
+     */
+    private function getStackTraceWithDepth(?int $stackDepth): string
+    {
+        $limit = 0; // 0 = unlimited for debug_backtrace
+        if ($stackDepth !== null && $stackDepth > 0) {
+            $limit = $stackDepth;
+        }
+
+        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, $limit > 0 ? $limit : 0);
+        $formatted = [];
+
+        foreach ($trace as $frame) {
+            $file = $frame['file'] ?? 'unknown';
+            $line = $frame['line'] ?? 0;
+            $function = $frame['function'] ?? 'anonymous';
+            $class = $frame['class'] ?? '';
+
+            if ($class) {
+                $formatted[] = "{$class}::{$function}({$file}:{$line})";
+            } else {
+                $formatted[] = "{$function}({$file}:{$line})";
+            }
+        }
+
+        $result = implode("\n", $formatted);
+
+        // 32KB safety cap
+        if (strlen($result) > 32768) {
+            $result = substr($result, 0, 32768);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Limit variable depth with truncation markers.
+     * v25: per-breakpoint max_depth overrides SDK-level captureDepth.
+     */
+    private function limitVariableDepth(array $variables, int $currentDepth, int $maxDepth): array
+    {
+        if ($currentDepth >= $maxDepth) {
+            return [
+                '_truncated' => true,
+                '_depth' => $currentDepth,
+            ];
+        }
+
+        $result = [];
+        foreach ($variables as $key => $value) {
+            if (is_array($value)) {
+                $result[$key] = $this->limitVariableDepth($value, $currentDepth + 1, $maxDepth);
+            } else {
+                $result[$key] = $value;
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * Send snapshot with payload limit enforcement.
+     * v25: per-breakpoint max_payload_bytes overrides SDK-level maxPayload.
+     */
+    private function captureSnapshotWithPayloadLimit(array $snapshot, ?int $bpMaxPayloadBytes): void
+    {
+        $limit = null;
+        if ($bpMaxPayloadBytes !== null && $bpMaxPayloadBytes > 0) {
+            $limit = $bpMaxPayloadBytes;
+        } elseif ($this->maxPayload !== null) {
+            $limit = $this->maxPayload;
+        }
+
+        if ($limit !== null) {
+            $payload = json_encode($snapshot);
+            if (strlen($payload) > $limit) {
+                $snapshot['variables'] = [
+                    '_truncated' => true,
+                    '_payload_size' => strlen($payload),
+                    '_max_payload' => $limit,
+                    '_truncated_by' => 'payload_limit',
+                ];
+                $snapshot['security_flags'] = [];
+            }
+        }
+
+        $this->captureSnapshot($snapshot);
     }
 
     /**
