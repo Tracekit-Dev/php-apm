@@ -254,7 +254,7 @@ class SnapshotClient
 
             // v25: Logpoint mode - capture only expression results, skip locals/stack/request
             if ($v25['mode'] === 'logpoint') {
-                $exprResults = Evaluator::evaluateExpressions($v25['capture_expressions'], $variables);
+                $logExprResults = Evaluator::evaluateExpressions($v25['capture_expressions'], $variables);
                 $logSnapshot = [
                     'breakpoint_id' => $breakpoint['id'] ?? null,
                     'service_name' => $this->serviceName,
@@ -262,8 +262,8 @@ class SnapshotClient
                     'function_name' => $location['function'],
                     'label' => $label,
                     'line_number' => $location['line'],
-                    'variables' => [],
-                    'expression_results' => $exprResults,
+                    'variables' => new \stdClass(),
+                    'expression_results' => empty($logExprResults) ? null : $logExprResults,
                     'stack_trace' => '',
                     'request_context' => null,
                     'captured_at' => date('c'),
@@ -301,9 +301,12 @@ class SnapshotClient
             }
 
             // v25: Evaluate capture expressions
-            $exprResults = [];
+            $exprResults = null;
             if (!empty($v25['capture_expressions'])) {
                 $exprResults = Evaluator::evaluateExpressions($v25['capture_expressions'], $variables);
+                if (empty($exprResults)) {
+                    $exprResults = null;
+                }
             }
 
             // v25: Capture stack trace with configurable depth
